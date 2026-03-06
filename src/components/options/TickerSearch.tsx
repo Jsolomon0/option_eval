@@ -13,6 +13,7 @@ export function TickerSearch({ selectedSymbol, onSelect }: Props) {
   const [query, setQuery] = useState(selectedSymbol);
   const [debouncedQuery, setDebouncedQuery] = useState(selectedSymbol);
   const [results, setResults] = useState<SymbolLookupItem[]>([]);
+  const [hasSearchError, setHasSearchError] = useState(false);
   const [highlightedIndex, setHighlightedIndex] = useState(-1);
   const [isOpen, setIsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -31,6 +32,7 @@ export function TickerSearch({ selectedSymbol, onSelect }: Props) {
   useEffect(() => {
     if (!debouncedQuery) {
       setResults([]);
+      setHasSearchError(false);
       setIsOpen(false);
       setHighlightedIndex(-1);
       setIsLoading(false);
@@ -52,11 +54,13 @@ export function TickerSearch({ selectedSymbol, onSelect }: Props) {
 
         const items = Array.isArray(payload) ? payload : payload.items ?? [];
         setResults(items);
+        setHasSearchError(false);
         setHighlightedIndex(items.length > 0 ? 0 : -1);
         setIsOpen(true);
       } catch (error) {
         if ((error as Error).name !== "AbortError") {
           setResults([]);
+          setHasSearchError(true);
           setHighlightedIndex(-1);
           setIsOpen(true);
         }
@@ -93,11 +97,26 @@ export function TickerSearch({ selectedSymbol, onSelect }: Props) {
     setHighlightedIndex(-1);
   }
 
+  function handleManualSelect() {
+    const symbol = query.trim().toUpperCase();
+    if (!symbol) {
+      return;
+    }
+    handleSelect({
+      symbol,
+      name: symbol,
+      type: "equity"
+    });
+  }
+
   function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter" && (results.length === 0 || highlightedIndex < 0)) {
+      event.preventDefault();
+      handleManualSelect();
+      return;
+    }
+
     if (!isOpen || results.length === 0) {
-      if (event.key === "ArrowDown" && results.length > 0) {
-        setIsOpen(true);
-      }
       if (event.key === "Escape") {
         setIsOpen(false);
       }
@@ -147,7 +166,16 @@ export function TickerSearch({ selectedSymbol, onSelect }: Props) {
         <div className="absolute z-10 mt-1 max-h-64 w-full overflow-y-auto rounded border bg-white shadow">
           {isLoading && <div className="px-3 py-2 text-sm text-gray-500">Searching...</div>}
           {!isLoading && results.length === 0 && (
-            <div className="px-3 py-2 text-sm text-gray-500">No matches found.</div>
+            <button
+              className="block w-full border-b px-3 py-2 text-left text-sm hover:bg-gray-50"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={handleManualSelect}
+            >
+              Use "{query.trim().toUpperCase()}"
+            </button>
+          )}
+          {!isLoading && hasSearchError && (
+            <div className="px-3 py-2 text-xs text-amber-700">Symbol search unavailable. Manual symbol entry is enabled.</div>
           )}
           {!isLoading &&
             results.map((item, index) => {
