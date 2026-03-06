@@ -13,6 +13,6 @@ export async function GET(request: NextRequest) {
   return withMarketGuards(request, `symbols:${q.toUpperCase()}`, TTL_MS, async () => {
     const provider = await getMarketProvider();
     const items = await provider.searchSymbols(q);
-    return { items };
+    return items;
   });
 }

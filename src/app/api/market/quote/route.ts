@@ -13,6 +13,11 @@ export async function GET(request: NextRequest) {
   return withMarketGuards(request, `quote:${symbol}`, TTL_MS, async () => {
     const provider = await getMarketProvider();
     const quote = await provider.getQuote(symbol);
-    return { quote };
+    const price = quote.last ?? quote.midpoint ?? quote.bid ?? quote.ask ?? null;
+    return {
+      symbol: quote.symbol,
+      price,
+      asOf: new Date().toISOString()
+    };
   });
 }

@@ -17,6 +17,11 @@ export async function getMarketProvider(): Promise<MarketDataProvider> {
   const providerName = (process.env.MARKET_DATA_PROVIDER ?? "tradier_sandbox").toLowerCase();
 
   switch (providerName) {
+    case "mock": {
+      const { MockProvider } = await import("./mockProvider");
+      providerSingleton = new MockProvider();
+      return providerSingleton;
+    }
     case "tradier":
     case "tradier_sandbox": {
       const { TradierSandboxProvider } = await import("./tradierSandboxProvider");

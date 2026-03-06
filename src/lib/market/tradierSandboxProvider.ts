@@ -93,8 +93,9 @@ export class TradierSandboxProvider implements MarketDataProvider {
       .filter((s) => Boolean(s.symbol))
       .map((s) => ({
         symbol: s.symbol as string,
-        description: s.description,
-        exchange: s.exchange
+        name: s.description ?? s.symbol,
+        exchange: s.exchange,
+        type: "equity"
       }));
   }
 

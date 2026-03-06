@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChainPicker } from "@/components/options/ChainPicker";
-import type { ChainRow, StrategyLeg, SymbolLookupItem } from "@/types/options";
+import { TickerSearch } from "@/components/options/TickerSearch";
+import type { ChainRow, StrategyLeg } from "@/types/options";
 
 const EMPTY_LEG = (): StrategyLeg => ({
   id: crypto.randomUUID(),
@@ -20,89 +21,111 @@ const EMPTY_LEG = (): StrategyLeg => ({
   manualMode: false
 });
 
+type QuoteResponse = {
+  symbol?: string;
+  price?: number | null;
+  asOf?: string;
+  quote?: { last: number | null; midpoint: number | null };
+  error?: string;
+};
+
 export function StrategyBuilder() {
-  const [tickerQuery, setTickerQuery] = useState("");
-  const [tickerResults, setTickerResults] = useState<SymbolLookupItem[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState("");
   const [spot, setSpot] = useState(100);
-  const [spotTouched, setSpotTouched] = useState(false);
-  const [rate, setRate] = useState(0.03);
+  const userEditedSpotRef = useRef(false);
+  const [rate, setRate] = useState(0);
   const [expirations, setExpirations] = useState<string[]>([]);
   const [selectedExpiry, setSelectedExpiry] = useState("");
   const [chainRows, setChainRows] = useState<ChainRow[]>([]);
   const [chainError, setChainError] = useState<string | null>(null);
+  const [symbolLoadError, setSymbolLoadError] = useState<string | null>(null);
+  const [isSymbolLoading, setIsSymbolLoading] = useState(false);
   const [legs, setLegs] = useState<StrategyLeg[]>([EMPTY_LEG()]);
   const [evalResult, setEvalResult] = useState<Record<string, unknown> | null>(null);
   const [evalError, setEvalError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!tickerQuery.trim()) {
-      setTickerResults([]);
-      return;
-    }
-
-    const timer = setTimeout(async () => {
-      try {
-        const response = await fetch(`/api/market/symbols/search?q=${encodeURIComponent(tickerQuery)}`);
-        const payload = (await response.json()) as { items?: SymbolLookupItem[]; error?: string };
-        if (!response.ok) {
-          throw new Error(payload.error ?? "Unable to search symbols");
-        }
-        setTickerResults(payload.items ?? []);
-      } catch {
-        setTickerResults([]);
-      }
-    }, 350);
-
-    return () => clearTimeout(timer);
-  }, [tickerQuery]);
-
-  useEffect(() => {
     if (!selectedSymbol) {
+      setIsSymbolLoading(false);
       return;
     }
+
+    const controller = new AbortController();
 
     const loadSymbolData = async () => {
+      setIsSymbolLoading(true);
+      setSymbolLoadError(null);
+      setChainError(null);
+      setChainRows([]);
+      setExpirations([]);
+      setSelectedExpiry("");
+      setRate(0.045);
+      userEditedSpotRef.current = false;
+
+      let quoteError: string | null = null;
+      let expirationError: string | null = null;
+
       try {
-        const quoteRes = await fetch(`/api/market/quote?symbol=${encodeURIComponent(selectedSymbol)}`);
-        const quotePayload = (await quoteRes.json()) as {
-          quote?: { last: number | null; midpoint: number | null };
-          error?: string;
-        };
+        const quoteRes = await fetch(`/api/market/quote?symbol=${encodeURIComponent(selectedSymbol)}`, {
+          signal: controller.signal
+        });
+        const quotePayload = (await quoteRes.json()) as QuoteResponse;
         if (!quoteRes.ok) {
           throw new Error(quotePayload.error ?? "Unable to fetch quote");
         }
 
-        const spotValue = quotePayload.quote?.last ?? quotePayload.quote?.midpoint;
-        if (!spotTouched && typeof spotValue === "number") {
+        const spotValue =
+          typeof quotePayload.price === "number"
+            ? quotePayload.price
+            : quotePayload.quote?.last ?? quotePayload.quote?.midpoint ?? null;
+        if (!userEditedSpotRef.current && typeof spotValue === "number") {
           setSpot(spotValue);
         }
-
-        const expRes = await fetch(
-          `/api/market/options/expirations?symbol=${encodeURIComponent(selectedSymbol)}`
-        );
-        const expPayload = (await expRes.json()) as { expirations?: string[]; error?: string };
-        if (!expRes.ok) {
-          throw new Error(expPayload.error ?? "Unable to fetch expirations");
-        }
-
-        const values = expPayload.expirations ?? [];
-        setExpirations(values);
-        if (values.length > 0) {
-          setSelectedExpiry((current) => current || values[0]);
-        }
       } catch (error) {
-        setChainError(error instanceof Error ? error.message : "Unable to load market data");
+        if ((error as Error).name === "AbortError") {
+          return;
+        }
+        quoteError = error instanceof Error ? error.message : "Unable to fetch quote";
+      }
+
+      try {
+        const expRes = await fetch(
+          `/api/market/options/expirations?symbol=${encodeURIComponent(selectedSymbol)}`,
+          { signal: controller.signal }
+        );
+        const expPayload = (await expRes.json()) as string[] | { expirations?: string[]; error?: string };
+        if (!expRes.ok) {
+          throw new Error((expPayload as { error?: string }).error ?? "Unable to fetch expirations");
+        }
+
+        const values = Array.isArray(expPayload) ? expPayload : expPayload.expirations ?? [];
+        setExpirations(values);
+        setSelectedExpiry(values[0] ?? "");
+      } catch (error) {
+        if ((error as Error).name === "AbortError") {
+          return;
+        }
+        expirationError = error instanceof Error ? error.message : "Unable to fetch expirations";
+      }
+
+      if (!controller.signal.aborted) {
+        const combinedError = [quoteError, expirationError].filter(Boolean).join(" ");
+        setSymbolLoadError(combinedError || null);
+        setIsSymbolLoading(false);
       }
     };
 
     loadSymbolData();
-  }, [selectedSymbol, spotTouched]);
+
+    return () => controller.abort();
+  }, [selectedSymbol]);
 
   useEffect(() => {
-    if (!selectedSymbol || !selectedExpiry) {
+    if (!selectedSymbol || !selectedExpiry || isSymbolLoading) {
       return;
     }
+
+    const controller = new AbortController();
 
     const loadChain = async () => {
       try {
@@ -110,7 +133,8 @@ export function StrategyBuilder() {
         const response = await fetch(
           `/api/market/options/chain?symbol=${encodeURIComponent(selectedSymbol)}&expiry=${encodeURIComponent(
             selectedExpiry
-          )}`
+          )}`,
+          { signal: controller.signal }
         );
         const payload = (await response.json()) as { rows?: ChainRow[]; error?: string };
         if (!response.ok) {
@@ -118,6 +142,10 @@ export function StrategyBuilder() {
         }
         setChainRows(payload.rows ?? []);
       } catch (error) {
+        if ((error as Error).name === "AbortError") {
+          return;
+        }
+
         setChainError(
           `Chain unavailable: ${error instanceof Error ? error.message : "unknown error"}. Manual editing remains enabled.`
         );
@@ -126,11 +154,17 @@ export function StrategyBuilder() {
     };
 
     loadChain();
-  }, [selectedSymbol, selectedExpiry]);
+    return () => controller.abort();
+  }, [selectedSymbol, selectedExpiry, isSymbolLoading]);
+
+  const isBuilderUnlocked = Boolean(selectedSymbol) && !isSymbolLoading;
 
   const canEvaluate = useMemo(
-    () => legs.length > 0 && legs.every((l) => l.expiry && l.strike > 0 && l.quantity > 0),
-    [legs]
+    () =>
+      isBuilderUnlocked &&
+      legs.length > 0 &&
+      legs.every((leg) => leg.expiry && leg.strike > 0 && leg.quantity > 0),
+    [isBuilderUnlocked, legs]
   );
 
   function addFromChain(params: {
@@ -224,197 +258,200 @@ export function StrategyBuilder() {
       <h1 className="text-2xl font-semibold">Multi-Leg Strategy Builder</h1>
 
       <section className="rounded border bg-white p-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <label className="text-sm">Ticker</label>
-          <input
-            value={tickerQuery}
-            onChange={(e) => setTickerQuery(e.target.value.toUpperCase())}
-            placeholder="Search symbol"
-            className="w-48 rounded border px-2 py-1"
-          />
-
-          <label className="text-sm">Spot S</label>
-          <input
-            type="number"
-            value={spot}
-            onChange={(e) => {
-              setSpot(Number(e.target.value));
-              setSpotTouched(true);
-            }}
-            className="w-24 rounded border px-2 py-1"
-          />
-
-          <label className="text-sm">Rate r</label>
-          <input
-            type="number"
-            step="0.001"
-            value={rate}
-            onChange={(e) => setRate(Number(e.target.value))}
-            className="w-24 rounded border px-2 py-1"
-          />
-
-          <label className="text-sm">Expiry</label>
-          <select
-            value={selectedExpiry}
-            onChange={(e) => setSelectedExpiry(e.target.value)}
-            className="rounded border px-2 py-1"
-          >
-            <option value="">Select expiry</option>
-            {expirations.map((exp) => (
-              <option key={exp} value={exp}>
-                {exp}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {tickerResults.length > 0 && (
-          <div className="mt-2 max-h-44 overflow-y-auto rounded border">
-            {tickerResults.slice(0, 12).map((item) => (
-              <button
-                key={`${item.symbol}-${item.exchange}`}
-                className="block w-full border-b px-2 py-1 text-left text-sm hover:bg-gray-50"
-                onClick={() => {
-                  setSelectedSymbol(item.symbol);
-                  setTickerQuery(item.symbol);
-                  setTickerResults([]);
-                }}
-              >
-                {item.symbol} {item.description ? `- ${item.description}` : ""}
-              </button>
-            ))}
-          </div>
+        <TickerSearch
+          selectedSymbol={selectedSymbol}
+          onSelect={(item) => {
+            setSelectedSymbol(item.symbol);
+          }}
+        />
+        {!selectedSymbol && (
+          <p className="mt-2 text-sm text-gray-600">Select a ticker to load quote and expirations.</p>
+        )}
+        {selectedSymbol && isSymbolLoading && (
+          <p className="mt-2 text-sm text-gray-600">Loading quote and expirations for {selectedSymbol}...</p>
         )}
       </section>
 
-      {chainError && <p className="rounded border border-amber-300 bg-amber-50 p-2 text-sm">{chainError}</p>}
+      {isBuilderUnlocked && (
+        <>
+          <section className="rounded border bg-white p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded bg-gray-100 px-2 py-1 text-xs font-medium text-gray-700">
+                {selectedSymbol}
+              </span>
 
-      {chainRows.length > 0 && <ChainPicker rows={chainRows} onAddLeg={addFromChain} />}
+              <label className="text-sm">Spot S</label>
+              <input
+                type="number"
+                value={spot}
+                onChange={(e) => {
+                  setSpot(Number(e.target.value));
+                  userEditedSpotRef.current = true;
+                }}
+                className="w-24 rounded border px-2 py-1"
+              />
 
-      <section className="rounded border bg-white p-4">
-        <div className="mb-2 flex items-center justify-between">
-          <h2 className="text-lg font-medium">Legs</h2>
-          <button
-            onClick={() => setLegs((prev) => [...prev, { ...EMPTY_LEG(), symbol: selectedSymbol, expiry: selectedExpiry }])}
-            className="rounded bg-gray-800 px-3 py-1 text-sm text-white"
-          >
-            Add empty leg
-          </button>
-        </div>
+              <label className="text-sm">Rate r</label>
+              <input
+                type="number"
+                step="0.001"
+                value={rate}
+                onChange={(e) => setRate(Number(e.target.value))}
+                className="w-24 rounded border px-2 py-1"
+              />
 
-        <div className="space-y-3">
-          {legs.map((leg) => (
-            <div key={leg.id} className="rounded border p-3">
-              <div className="mb-2 flex flex-wrap items-center gap-2">
-                <select
-                  value={leg.side}
-                  onChange={(e) => updateLeg(leg.id, { side: e.target.value as "long" | "short" })}
-                  className="rounded border px-2 py-1 text-sm"
-                >
-                  <option value="long">Long</option>
-                  <option value="short">Short</option>
-                </select>
-                <select
-                  value={leg.optionType}
-                  onChange={(e) => updateLeg(leg.id, { optionType: e.target.value as "call" | "put" })}
-                  className="rounded border px-2 py-1 text-sm"
-                >
-                  <option value="call">Call</option>
-                  <option value="put">Put</option>
-                </select>
-                <input
-                  type="number"
-                  value={leg.strike}
-                  onChange={(e) => updateLeg(leg.id, { strike: Number(e.target.value) })}
-                  className="w-24 rounded border px-2 py-1 text-sm"
-                  placeholder="Strike"
-                />
-                <input
-                  type="date"
-                  value={leg.expiry}
-                  onChange={(e) => updateLeg(leg.id, { expiry: e.target.value })}
-                  className="rounded border px-2 py-1 text-sm"
-                />
-                <input
-                  type="number"
-                  value={leg.quantity}
-                  onChange={(e) => updateLeg(leg.id, { quantity: Number(e.target.value) })}
-                  className="w-20 rounded border px-2 py-1 text-sm"
-                  placeholder="Qty"
-                />
-                <label className="flex items-center gap-1 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(leg.manualMode)}
-                    onChange={(e) =>
-                      updateLeg(leg.id, {
-                        manualMode: e.target.checked,
-                        ivSource: e.target.checked ? "manual" : leg.ivSource
-                      })
-                    }
-                  />
-                  Manual Mode
-                </label>
-                <button onClick={() => removeLeg(leg.id)} className="rounded border px-2 py-1 text-xs">
-                  Remove
-                </button>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2 text-sm">
-                <label>IV</label>
-                <input
-                  type="number"
-                  step="0.001"
-                  value={leg.iv ?? ""}
-                  onChange={(e) =>
-                    updateLeg(leg.id, {
-                      iv: e.target.value === "" ? null : Number(e.target.value),
-                      ivSource: "manual"
-                    })
-                  }
-                  className="w-24 rounded border px-2 py-1"
-                />
-                <label>Premium</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={leg.premium ?? ""}
-                  onChange={(e) =>
-                    updateLeg(leg.id, {
-                      premium: e.target.value === "" ? null : Number(e.target.value)
-                    })
-                  }
-                  className="w-24 rounded border px-2 py-1"
-                />
-                <label>Bid</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={leg.bid ?? ""}
-                  onChange={(e) => updateLeg(leg.id, { bid: e.target.value === "" ? null : Number(e.target.value) })}
-                  className="w-20 rounded border px-2 py-1"
-                />
-                <label>Ask</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={leg.ask ?? ""}
-                  onChange={(e) => updateLeg(leg.id, { ask: e.target.value === "" ? null : Number(e.target.value) })}
-                  className="w-20 rounded border px-2 py-1"
-                />
-              </div>
+              <label className="text-sm">Expiry</label>
+              <select
+                value={selectedExpiry}
+                onChange={(e) => setSelectedExpiry(e.target.value)}
+                className="rounded border px-2 py-1"
+              >
+                <option value="">Select expiry</option>
+                {expirations.map((exp) => (
+                  <option key={exp} value={exp}>
+                    {exp}
+                  </option>
+                ))}
+              </select>
             </div>
-          ))}
-        </div>
-      </section>
+          </section>
 
-      <button
-        onClick={evaluate}
-        disabled={!canEvaluate}
-        className="rounded bg-green-700 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        Evaluate Strategy
-      </button>
+          {symbolLoadError && (
+            <p className="rounded border border-amber-300 bg-amber-50 p-2 text-sm">{symbolLoadError}</p>
+          )}
+
+          {chainError && <p className="rounded border border-amber-300 bg-amber-50 p-2 text-sm">{chainError}</p>}
+
+          {chainRows.length > 0 && <ChainPicker rows={chainRows} onAddLeg={addFromChain} />}
+
+          <section className="rounded border bg-white p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <h2 className="text-lg font-medium">Legs</h2>
+              <button
+                onClick={() =>
+                  setLegs((prev) => [...prev, { ...EMPTY_LEG(), symbol: selectedSymbol, expiry: selectedExpiry }])
+                }
+                className="rounded bg-gray-800 px-3 py-1 text-sm text-white"
+              >
+                Add empty leg
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {legs.map((leg) => (
+                <div key={leg.id} className="rounded border p-3">
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <select
+                      value={leg.side}
+                      onChange={(e) => updateLeg(leg.id, { side: e.target.value as "long" | "short" })}
+                      className="rounded border px-2 py-1 text-sm"
+                    >
+                      <option value="long">Long</option>
+                      <option value="short">Short</option>
+                    </select>
+                    <select
+                      value={leg.optionType}
+                      onChange={(e) => updateLeg(leg.id, { optionType: e.target.value as "call" | "put" })}
+                      className="rounded border px-2 py-1 text-sm"
+                    >
+                      <option value="call">Call</option>
+                      <option value="put">Put</option>
+                    </select>
+                    <input
+                      type="number"
+                      value={leg.strike}
+                      onChange={(e) => updateLeg(leg.id, { strike: Number(e.target.value) })}
+                      className="w-24 rounded border px-2 py-1 text-sm"
+                      placeholder="Strike"
+                    />
+                    <input
+                      type="date"
+                      value={leg.expiry}
+                      onChange={(e) => updateLeg(leg.id, { expiry: e.target.value })}
+                      className="rounded border px-2 py-1 text-sm"
+                    />
+                    <input
+                      type="number"
+                      value={leg.quantity}
+                      onChange={(e) => updateLeg(leg.id, { quantity: Number(e.target.value) })}
+                      className="w-20 rounded border px-2 py-1 text-sm"
+                      placeholder="Qty"
+                    />
+                    <label className="flex items-center gap-1 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(leg.manualMode)}
+                        onChange={(e) =>
+                          updateLeg(leg.id, {
+                            manualMode: e.target.checked,
+                            ivSource: e.target.checked ? "manual" : leg.ivSource
+                          })
+                        }
+                      />
+                      Manual Mode
+                    </label>
+                    <button onClick={() => removeLeg(leg.id)} className="rounded border px-2 py-1 text-xs">
+                      Remove
+                    </button>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 text-sm">
+                    <label>IV</label>
+                    <input
+                      type="number"
+                      step="0.001"
+                      value={leg.iv ?? ""}
+                      onChange={(e) =>
+                        updateLeg(leg.id, {
+                          iv: e.target.value === "" ? null : Number(e.target.value),
+                          ivSource: "manual"
+                        })
+                      }
+                      className="w-24 rounded border px-2 py-1"
+                    />
+                    <label>Premium</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={leg.premium ?? ""}
+                      onChange={(e) =>
+                        updateLeg(leg.id, {
+                          premium: e.target.value === "" ? null : Number(e.target.value)
+                        })
+                      }
+                      className="w-24 rounded border px-2 py-1"
+                    />
+                    <label>Bid</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={leg.bid ?? ""}
+                      onChange={(e) => updateLeg(leg.id, { bid: e.target.value === "" ? null : Number(e.target.value) })}
+                      className="w-20 rounded border px-2 py-1"
+                    />
+                    <label>Ask</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={leg.ask ?? ""}
+                      onChange={(e) => updateLeg(leg.id, { ask: e.target.value === "" ? null : Number(e.target.value) })}
+                      className="w-20 rounded border px-2 py-1"
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <button
+            onClick={evaluate}
+            disabled={!canEvaluate}
+            className="rounded bg-green-700 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Evaluate Strategy
+          </button>
+        </>
+      )}
 
       {evalError && <p className="rounded border border-red-300 bg-red-50 p-2 text-sm">{evalError}</p>}
 

@@ -38,8 +38,9 @@ export type ChainRow = {
 
 export type SymbolLookupItem = {
   symbol: string;
-  description?: string;
+  name?: string;
   exchange?: string;
+  type?: string;
 };
 
 export type MarketQuote = {
