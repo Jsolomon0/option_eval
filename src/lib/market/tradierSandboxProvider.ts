@@ -58,6 +58,35 @@ function toArray<T>(value: T | T[] | undefined | null): T[] {
   return Array.isArray(value) ? value : [value];
 }
 
+function normalizeQuery(value: string): string {
+  return value.trim().toUpperCase();
+}
+
+function lookupScore(item: { symbol?: string; description?: string }, query: string): number {
+  const symbol = (item.symbol ?? "").toUpperCase();
+  const name = (item.description ?? "").toUpperCase();
+
+  if (!symbol) {
+    return 999;
+  }
+  if (symbol === query) {
+    return 0;
+  }
+  if (symbol.startsWith(query)) {
+    return 1;
+  }
+  if (symbol.includes(query)) {
+    return 2;
+  }
+  if (name.startsWith(query)) {
+    return 3;
+  }
+  if (name.includes(query)) {
+    return 4;
+  }
+  return 5;
+}
+
 async function tradierRequest<T>(path: string, params: Record<string, string>): Promise<T> {
   const token = process.env.TRADIER_SANDBOX_TOKEN;
   if (!token) {
@@ -88,9 +117,19 @@ async function tradierRequest<T>(path: string, params: Record<string, string>): 
 
 export class TradierSandboxProvider implements MarketDataProvider {
   async searchSymbols(query: string): Promise<SymbolLookupItem[]> {
-    const payload = await tradierRequest<TradierLookupResponse>("/markets/lookup", { query });
+    const normalizedQuery = normalizeQuery(query);
+    const payload = await tradierRequest<TradierLookupResponse>("/markets/lookup", { query: normalizedQuery });
+
     return toArray(payload.securities?.security)
-      .filter((s) => Boolean(s.symbol))
+      .filter((s) => lookupScore(s, normalizedQuery) < 5)
+      .sort((a, b) => {
+        const scoreDiff = lookupScore(a, normalizedQuery) - lookupScore(b, normalizedQuery);
+        if (scoreDiff !== 0) {
+          return scoreDiff;
+        }
+        return (a.symbol ?? "").localeCompare(b.symbol ?? "");
+      })
+      .slice(0, 25)
       .map((s) => ({
         symbol: s.symbol as string,
         name: s.description ?? s.symbol,
